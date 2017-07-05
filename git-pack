@@ -1,0 +1,56 @@
+#!/bin/sh
+# vim: set ft=sh fdm=manual ts=2 sw=2 sts=2 tw=85 et:
+
+# ================================================
+#
+# Git package
+#
+# $ git pack --work-tree=<WORK_TREE> --out foo.tgz
+#
+# Author: Allex Wang (allex.wxn@gmail.com)
+# GistID: c180b4d893b0bb293f929d009657d4fc
+# GistURL: https://gist.github.com/c180b4d893b0bb293f929d009657d4fc
+# ================================================
+
+set -euE
+set -o pipefail
+
+basename=`basename $0`
+outfile=
+work_tree=
+
+# parse argv
+args=()
+while [ $# -gt 0 ]
+do
+  opt="$1"
+  shift
+  case "$opt" in
+    -o | --out) outfile="$1"; shift ;;
+    --work-tree) work_tree="$1"; shift ;;
+    *) args+=("\"$opt\"") ;;
+  esac
+  [ x"$opt" = x"--" ] && break
+done
+eval set -- "${args[@]:-}"
+
+work_tree="${work_tree:-$(git rev-parse --show-toplevel)}" || exit 1
+[ -d "$work_tree" ] || { echo >&2 "Not a valid worktree: $work_tree"; exit 1; }
+
+if [ -z "$outfile" ]; then
+  pack_name=`[ -f "${work_tree}/package.json" ] && node -p "require('$work_tree/package.json').name"`
+  if [ ! "$pack_name" ]; then
+    pack_name=`basename $work_tree`
+  fi
+  pack_name=${pack_name##*/}
+  outfile="${work_tree}/${pack_name}.tgz"
+fi
+
+echo "[$basename] Building package file => ${outfile}..."
+
+cd "$work_tree" && (
+  tar="tar --exclude $outfile"
+  [ -f ".npmignore" ] && tar="$tar -X .npmignore"
+  # use ls pipe to fix issue of file changed as we read it
+  ls ./ -1a|grep -v '^\.*$'|xargs $tar -czf $outfile
+)

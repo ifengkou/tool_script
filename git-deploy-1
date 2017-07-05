@@ -1,0 +1,140 @@
+#!/bin/sh
+# vim: set ft=sh fdm=manual ts=2 sw=2 sts=2 tw=85 et:
+
+# Toolchains for remote deploy
+# 192.168.200.166
+# eg: ./deploy.sh -f ./dist.tgz \
+#                 -h 10.10.1.177,10.10.1.178 -u apps -p "abc@foo" \
+#                 --server-dir /var/node-apps/pre-analysys-portal.3001 \
+#                 --boot ./boot.sh
+#
+# Author: Allex Wang <http://iallex.com/> (allex.wxn@gmail.com)
+# MIT Licensed
+#
+# GistID: 8d9c74ae82b3439c0268e92f8ea650a2
+# GistURL: https://gist.github.com/8d9c74ae82b3439c0268e92f8ea650a2
+#
+# Last Modified: Thu Jun 08, 2017 11:18
+
+set -eE
+
+cwd="`pwd`"
+boot_script="./server.sh"
+ver=
+verbose=
+tarball=
+srv_list=()
+srv_use=
+srv_pass=
+srv_root=
+
+# parse argv
+args=()
+while [ $# -gt 0 ]
+do
+  opt="$1"
+  shift
+  case "$opt" in
+    -u) srv_use="$1"; shift ;;
+    -p) srv_pass="$1"; shift ;;
+    --token)
+      token=`base64 -d <<< "$1"|gunzip`
+      srv_use="${token%%|*}"
+      srv_pass="${token#*|}"
+      shift
+      ;;
+    -h | --server)
+      # parse server list
+      srv_list=( $(printf "$1"|tr , ' ') )
+      shift
+      ;;
+    --server-dir)
+      srv_root="${1%%/}"
+      srv_root="${srv_root## *}"
+      shift
+      ;;
+    -f | --tarball) tarball="$1"; shift ;;
+    --boot | --startup) boot_script="$1"; shift ;;
+    -v | --version) ver="$1"; shift ;;
+    -x) verbose=1 ;;
+    *) args+=("\"$opt\"") ;;
+  esac
+  [ x"$opt" = x"--" ] && break
+done
+eval set -- "${args[@]:-}"
+unset -f args
+
+if [ ${#srv_list[@]} -eq 0 ]; then
+  echo >&2 "fatal: server empty. Exiting."
+  exit 1
+fi
+
+srv_root="${srv_root:-}"
+srv_dist="${srv_root}/versions"
+ver_file="${srv_root}/.version"
+
+if [ ! "$srv_root" ]; then
+  echo >&2 "fatal: server root not valid. Exiting."
+  exit 1
+fi
+
+if [ ! -f "$tarball" ]; then
+  echo >&2 "fatal: No such tarball: '$tarball'. Exiting."
+  exit 1
+fi
+
+ver="${ver:-`git log -1 --pretty=%h`}"
+ver="${ver:-`date +%D.%H%M%S|tr -d /`}"
+
+deploy_dir="${srv_dist}/${ver}/"
+dest_file="${deploy_dir}${tarball##*/}"
+
+llast=last
+lcur=current
+
+# Resolve boot script path
+if [[ "$boot_script" != /* ]] && [[ "$boot_script" == */* ]]
+then
+  boot_script="${srv_root}/${boot_script##./}"
+fi
+
+cmd="$(cat <<-EOF
+(set -eE
+[ "$verbose" ] && set -x;
+if [ -s "$ver_file" ]; then
+  [ "\$(cat "$ver_file")" != "$ver" ] || { echo "Duplicate deploy. Aborting."; exit; }
+fi
+[ -d "$srv_root" ] || mkdir -p "$srv_root" || exit 1
+cd "$srv_root" || exit 1
+[ -d "$srv_dist" ] || mkdir -p "$srv_dist" || exit 1
+tar -C "$deploy_dir" -xzf "$dest_file" && rm -f "$dest_file" \
+  && (cd $srv_dist \
+      && (if [ -h "$lcur" ]; then
+            mv -T "$lcur" "$llast" || exit 1
+          fi) \
+      && ln -sfn "$ver" "$lcur" \
+      && echo "$ver" > "$ver_file") \
+  && ([ -e "${srv_root}/server" ] || ln -s "./${srv_dist#${srv_root}/}/${lcur}" "./server") \
+  && echo "============" \
+  && echo "DEPLOY DONE! (ver => $ver)" \
+  && echo "============" \
+  && (if [ "$boot_script" ]; then
+        if [[ "${boot_script%% *}" =~ / ]]; then
+          if [ -f "$boot_script" ]; then
+            (. "$boot_script")
+          else
+            echo >&2 "warning: boot shell not exists: ${boot_script}.  Skip boot."
+          fi
+        else
+          eval "$boot_script"
+        fi
+      else
+        echo >&2 "warning: The bootstrap cmd not found.  Skip boot."
+      fi)
+) 2>&1
+EOF
+)"
+
+for i in "${srv_list[@]}"; do
+  issh ${srv_use}@$i -p "$srv_pass" ${verbose:+-v} --src "$tarball" --dest "$deploy_dir" "$cmd"
+done
